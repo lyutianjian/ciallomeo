@@ -2,9 +2,13 @@ name: Try to Create OCI VM
 
 on:
   schedule:
-    # 每 10 分钟自动尝试一次
     - cron: "3,13,23,33,43,53 * * * *"
   workflow_dispatch:
+
+# 赋予自动关停自身的权限
+permissions:
+  actions: write
+  contents: read
 
 jobs:
   build-and-deploy:
@@ -33,12 +37,12 @@ jobs:
 
           pip install oci-cli
 
-          # 1. 写入 API 私钥（完整路径）
+          # 1. 写入 API 私钥
           mkdir -p /home/runner/.oci
           printf '%s\n' "$KEY_CONTENT" > /home/runner/.oci/oci_api_key.pem
           chmod 600 /home/runner/.oci/oci_api_key.pem
 
-          # 2. 写入 OCI Config 配置文件（注意是 .oci/config）
+          # 2. 写入 OCI Config 配置文件
           echo "[DEFAULT]" > /home/runner/.oci/config
           echo "user=${{ secrets.OCI_CLI_USER }}" >> /home/runner/.oci/config
           echo "fingerprint=${{ secrets.OCI_CLI_FINGERPRINT }}" >> /home/runner/.oci/config
@@ -95,3 +99,12 @@ jobs:
             ```json
             ${{ steps.create_vm.outputs.log_data }}
             ```
+
+      # 🌟 成功后自动关停自身（避免重复创建与报错）
+      - name: Auto Disable Workflow On Success
+        if: steps.create_vm.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "VM created successfully! Disabling this workflow automatically..."
+          gh workflow disable create-vm.yml --repo ${{ github.repository }}
