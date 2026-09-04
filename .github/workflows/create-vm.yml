@@ -1,0 +1,88 @@
+name: Try to Create OCI VM
+
+on:
+  schedule:
+    # 每 15 分钟触发一次
+    - cron: "*/15 * * * *"
+  # 支持在 GitHub 页面上手动一键触发测试
+  workflow_dispatch:
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Cache pip packages
+        id: cache-pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.local
+          key: ${{ runner.os }}-pip-oci-cli-v1
+
+      - name: Add OCI CLI to path
+        run: echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Setup OCI CLI and Try to Create VM
+        id: create_vm
+        continue-on-error: true 
+        run: |
+          set -o pipefail
+
+          pip install oci-cli
+
+          mkdir -p ~/.oci
+          echo "${{ secrets.OCI_CLI_KEY_CONTENT }}" > ~/.oci/oci_api_key.pem
+          chmod 600 ~/.oci/oci_api_key.pem
+
+          echo "[DEFAULT]" > ~/.oci/config
+          echo "user=${{ secrets.OCI_CLI_USER }}" >> ~/.oci/config
+          echo "tenancy=${{ secrets.OCI_CLI_TENANCY }}" >> ~/.oci/config
+          echo "fingerprint=${{ secrets.OCI_CLI_FINGERPRINT }}" >> ~/.oci/config
+          echo "key_file=~/.oci/oci_api_key.pem" >> ~/.oci/config
+          echo "region=${{ secrets.OCI_CLI_REGION }}" >> ~/.oci/config
+          echo "${{ secrets.SSH_PUBLIC_KEY }}" > /home/runner/my_ssh_key.pub
+
+          # 随机休眠 30 到 180 秒（打散时间点，避开整点拥堵与机械模式）
+          SLEEP_TIME=$(( 30 + RANDOM % 151 ))
+          echo "Random jitter: sleeping for ${SLEEP_TIME} seconds before API call..."
+          sleep $SLEEP_TIME
+
+          # 发起创建实例请求
+          OCI_OUTPUT=$(oci compute instance launch \
+            --compartment-id "${{ secrets.OCI_COMPARTMENT_ID }}" \
+            --availability-domain "${{ secrets.AD_NAME }}" \
+            --shape "VM.Standard.A1.Flex" \
+            --shape-config '{"ocpus":4,"memoryInGBs":24}' \
+            --subnet-id "${{ secrets.OCI_SUBNET_ID }}" \
+            --image-id "${{ secrets.IMAGE_ID }}" \
+            --ssh-authorized-keys-file "/home/runner/my_ssh_key.pub" \
+            --assign-public-ip true \
+            --display-name "arm-instance-1" \
+            --boot-volume-size-in-gbs 100 2>&1 || true)
+
+          # 记录执行日志
+          echo "log_data<<EOF" >> $GITHUB_OUTPUT
+          echo "$OCI_OUTPUT" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          # 判断是否成功进入 PROVISIONING 状态
+          if echo "$OCI_OUTPUT" | grep -q '"lifecycle-state": "PROVISIONING"'; then
+            echo "Success! VM is provisioning."
+            exit 0
+          else
+            echo "Error: Capacity full or request failed."
+            exit 1
+          fi
+
+      - name: Send Discord Notification
+        if: always()
+        uses: sarisia/actions-status-discord@v1.15.4
+        with:
+          webhook: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          title: "OCI ARM VM Status: ${{ steps.create_vm.outcome }}"
+          status: ${{ steps.create_vm.outcome }}
+          color: ${{ steps.create_vm.outcome == 'success' && '0x28a745' || '0xdc3545' }}
+          description: |
+            **Status:** `${{ steps.create_vm.outcome }}`
+            ```json
+            ${{ steps.create_vm.outputs.log_data }}
+            ```
